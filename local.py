@@ -3,7 +3,6 @@
 # Set up analysis parameters, filenames, arrays, functions                                          #
 #///////////////////////////////////////////////////////////////////////////////////////////////////#
 
-import constants
 import numpy as np
 import healpy as hp
 import sys
@@ -11,84 +10,71 @@ import pickle
 
 # from cmblensplus/utils/
 import curvedsky as cs
+import constant as c
 import cmb
 
 
-#////////// Define Fixed Values //////////#
-# CMB temperauter in uK
-Tcmb = cmb.Tcmb
-
+#////////// Define fixed values //////////#
 # Index for realizations e.g. 0001
 ids = [str(i).zfill(4) for i in range(-1,1000)]
 ids[0] = 'real'
 
+# cosmological parameters
+H0    = 67.36
+ombh2 = 0.02237
+omch2 = 0.12
+As    = 2.099e-9
+ns    = 0.965
+Om    = (omch2+ombh2)/(H0*.01)**2
+cps   = {'H0':H0,'Om':Om,'Ov':1-Om,'w0':-1,'wa':0.}
 
-# directory
-def data_directory(root_pub='../data/PTEP_20200915_compsep/',root_lens='../data/lensing/'):
+# data directory
+def data_directory(root_fg='../data/PTEP_FG/',root_lens='../data/lensing/',root_mass='../data/lensing/multi-tracer/'):
     direct = {}
-    direct['pub']  = root_pub + '/'
+    direct['fgs']  = root_fg + '/'
     direct['inp']  = '../data/'
-    direct['loc']  = root_lens
-    direct['cmb']  = root_lens + 'cmb/'
-    direct['win']  = root_lens + 'window/'
-    direct['del']  = root_lens + 'delens/'
-    direct['dlm']  = direct['del']+'alm/'
-    direct['dps']  = direct['del']+'aps/'
-    direct['mas']  = root_lens + 'mass/'
+    direct['loc']  = root_mass
+    direct['cmb']  = root_mass + 'cmb/'
+    direct['del']  = root_mass + 'delens/'
+    direct['mas']  = root_mass + 'mass/'
+    direct['msk']  = root_lens + 'Masks/'
+    direct['LOC']  = root_lens + '/'
     return direct
 
+#////////// Input data files and products //////////#
 
-# Define parameters, filename and array
 class analysis:
+    '''
+    Input products to start lensing/delensing analysis
+    '''
 
-    def __init__(self,doreal=False,snmin=1,snmax=10,ilmax=5100):
+    def __init__(self,doreal=False,ilmax=5100):
 
         #//// set parameters ////#
-        # minimum/maximum of realization index to be analyzed
-        # the 1st index (0000) is used for real (or mock) data
-        self.snmin  = snmin
-        self.snmax  = snmax
 
-        # use real data or not for index = 0000
-        self.doreal = doreal
-        
-        # total number of realizations and array of realization index
-        self.snum   = snmax - snmin + 1
-        self.rlz    = np.linspace(snmin,snmax,self.snum,dtype=np.int)
-        
         # input cmb maximum multipole
         self.ilmax  = ilmax
 
-        #//// filename for input fixed data ////#
+        #//// theory angular power spectra ////#
         # set directory
         d = data_directory()
-        #d_alm = d['cmb'] + 'alm/'
-        #d_map = d['cmb'] + 'map/'
         
-        # input kappa alm
-        #self.fkalm = [d_alm+'/iklm_nside'+str(nside)+'_'+x+'.pkl' for x in ids]
-
-        # input unlensed cmb alm
-        #self.fualm = [d_alm+'/iulm_nside'+str(nside)+'_'+x+'.pkl' for x in ids]
+        # input Anto's CMB map
+        self.ficmb = [ d['LOC'] + 'S4BIRD/CMB_Lensed_Maps/CMB/cmb_sims_'+x+'.fits' for x in ids ]
         
-        # input lensed cmb alm
-        #self.flalm = [d_alm+'/illm_nside'+str(nside)+'_'+x+'.pkl' for x in ids]
-
-        #input SO lensed CMB alm
-        self.ficmb = ['/project/projectdirs/sobs/v4_sims/mbs/cmb/fullskyLensedUnabberatedCMB_alm_set00_0'+x+'.fits' for x in ids]
-        
-        #input SO phi alm
-        self.fiplm = ['/global/project/projectdirs/sobs/v4_sims/mbs/cmb/input_phi/fullskyPhi_alm_0'+x+'.fits' for x in ids]
+        # input Anto's phi alm
+        self.fiplm = [ d['LOC'] + 'S4BIRD/CMB_Lensed_Maps/MASS/phi_sims_'+x+'.fits' for x in ids ]
 
         # input cmb cls
-        self.fucl = d['inp']+'cosmo2017_10K_acc3_scalCls.dat'
-        self.flcl = d['inp']+'cosmo2017_10K_acc3_lensedCls.dat'
+        self.fucl = d['LOC'] + 'S4BIRD/CAMB/BBSims_scal_dls.dat'
+        self.flcl = d['LOC'] + 'S4BIRD/CAMB/BBSims_lensed_dls.dat'
+        self.ftcl = d['LOC'] + 'S4BIRD/CAMB/BBSims_tens_dls.dat'
 
         # loading theoretical cl
-        self.ucl = cmb.read_camb_cls(self.fucl,output='array')[:,:ilmax+1]
+        self.ucl = cmb.read_camb_cls(self.fucl,ftype='scal',output='array')[:,:ilmax+1]
         self.lcl = cmb.read_camb_cls(self.flcl,ftype='lens',output='array')[:,:ilmax+1]
+        self.tcl = cmb.read_camb_cls(self.ftcl,ftype='lens',output='array')[:,:ilmax+1]
 
-        #//// set arrays ////#
         #multipole
         self.l  = np.linspace(0,ilmax,ilmax+1)
 
@@ -108,54 +94,89 @@ class analysis:
         self.pp = self.ucl[3]
         self.kk = self.ucl[3]*self.kL**2
 
+        #//// survey window ////#
+        self.wind = {}
+        self.wind['FG']       = d['LOC'] + 'FG_mask.fits'
+        self.wind['PR2']      = d['msk'] + 'HFI_Mask_GalPlane-apo0_2048_R2.00.fits'
+        self.wind['litebird'] = d['LOC'] + 'FG_mask.fits'
+        self.wind['euclid']   = d['msk'] + 'euclid.fits'
+        self.wind['lsst']     = d['msk'] + 'lsst.fits'
+        self.wind['cib']      = d['msk'] + 'cib.fits'
+        self.wind['cmbs4']    = d['msk'] + 'cmbs4.fits'
+        self.wind['plklens']  = d['msk'] + 'plk_lensing.fits'
 
-    '''
-    def sim_ucmb(self,**kwargs_ov): # generate unlensed CMB alms
-
-        for i in glob.rlz:
-            if misctools.check_path(glob.fualm[i],**kwargs_ov): continue
-            if kwargs_ov['verbose']: print('generate Gaussian T/E alms', i)
-            Talm, Ealm = cs.utils.gauss2alm(glob.lmax,glob.uTT,glob.uEE,glob.uTE) 
-            pickle.dump((Talm,Ealm),open(glob.fualm[i],"wb"),protocol=pickle.HIGHEST_PROTOCOL)
-
-
-    def get_klm(self,**kwargs_ov):
-
-        for i in glob.rlz:
-            if misctools.check_path(glob.fkalm[i],**kwargs_ov): continue
-            if kwargs_ov['verbose']:  print('generate plm, rlz = '+str(i))
-            klm = cs.utils.gauss1alm(glob.lmax,glob.kk)
-            pickle.dump((klm),open(glob.fkalm[i],"wb"),protocol=pickle.HIGHEST_PROTOCOL)
-        
-        
-    def remap_cmb(self,**kwargs_ov):  # Remapping CMB in full sky
-
-        for i in glob.rlz:
-            if misctools.check_path(glob.fsalm['T'][i],overwrite=overwrite): continue
-
-        # load cmb and phi
-        Talm, Ealm = pickle.load(open(p.fcmb.ualm[i],"rb"))
-        plm = pickle.load(open(p.fpalm[i],"rb"))
-
-        # remap
-        grad = curvedsky.delens.phi2grad(p.npixr,p.lmax,plm)
-        Talm, Ealm, Balm = curvedsky.delens.remap_tp(p.npixr,p.lmax,grad,np.array((Talm,Ealm,0*Ealm)))
-
-        # save
-        pickle.dump((Talm),open(p.fcmb.salm['T'][i],"wb"),protocol=pickle.HIGHEST_PROTOCOL)
-        pickle.dump((Ealm),open(p.fcmb.salm['E'][i],"wb"),protocol=pickle.HIGHEST_PROTOCOL)
-        pickle.dump((Balm),open(p.fcmb.salm['B'][i],"wb"),protocol=pickle.HIGHEST_PROTOCOL)
-    '''
+        #//// residual FG ////#
+        self.ffgs = [d['fgs']+'/output_component_separation_PTEP_v18022021_noise_'+x+'.fits' for x in ids]
+        self.clfg = bl = np.loadtxt(d['fgs']+'Cl.txt',unpack=True)[1]/c.Tcmb**2
 
     
-def load_input_kappa(rlz_index,glob,lmax,to_healpix=True):
-    # load input phi alm and then convert it to kappa alm
-    iplm = hp.read_alm( glob.fiplm[rlz_index] )
-    #if to_healpix:
-    iplm = cs.utils.lm_healpy2healpix( iplm, 5100 ) [:lmax+1,:lmax+1]
-    iklm = iplm * glob.kL[:lmax+1,None]
-    #else:
-    #    iklm = hp.almxfl( iplm, glob.kL[:lmax+1] )
-    return iklm
+    def load_input_kappa(self,rlz_index,lmax):
+        '''
+        Read input phi alm and then convert it to kappa alm
+        '''
+        iplm = hp.read_alm( self.fiplm[rlz_index] )
+
+        # convert to healpix alm convention:
+        LMAX = cs.utils.lmpy2lmax(len(iplm))
+        iplm = cs.utils.lm_healpy2healpix( iplm, LMAX ) [:lmax+1,:lmax+1]
+
+        # convert to kappa and output
+        return  iplm * self.kL[:lmax+1,None]
+
+
+#////////// Utility functions //////////#
+
+def rlz(snmin,snmax):
+    '''
+    Array of realization index
+    '''
+    return np.linspace(snmin,snmax,snmax-snmin+1,dtype=np.int)
+
+
+class forecast:
+    '''
+    Simple forecast tools
+    '''
+    
+    def __init__(self,experiment):
+        
+        # pol noise and beam
+        if experiment=='litebird':
+            self.sigma = 3.
+            self.theta = 30.
+            self.lTmax = 3000
+            self.rlmin = 100
+            self.rlmax = 1024
+        if experiment=='s4':
+            self.sigma = 1.
+            self.theta = 3.
+            self.lTmax = 3000
+            self.rlmin = 100
+            self.rlmax = 4096
+        
+        self.fnlkk = data_directory()['mas']+'nlkk/'+experiment+'.dat'
+
+
+    def set_noise_spectrum(self):
+
+        # noise spectrum
+        self.nl = cmb.nl_cmb_all(self.rlmax,self.sigma/np.sqrt(2.),self.theta,lTmax=self.lTmax)
+        
+        # observed cl
+        obj = analysis(ilmax=self.rlmax)
+        self.lcl = obj.lcl[:4,:]
+        self.ocl = self.lcl + self.nl
+
+        
+    def compute_nlkk(self,Lmax=2048):
+        self.set_noise_spectrum()
+        self.nlkk = cs.norm_quad.qall('lens',[True,True,True,True,True,False],Lmax,self.rlmin,self.rlmax,self.lcl,self.ocl,lfac='k')[0]
+        np.savetxt(self.fnlkk,self.nlkk.T)
+
+        
+    def load_nlkk(self,Lmax=2048):
+        return np.loadtxt( self.fnlkk, unpack=True )[5,:Lmax+1]
+
+
 
 

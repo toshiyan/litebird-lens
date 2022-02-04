@@ -1,28 +1,28 @@
-# Running delenisng code
+#!/usr/bin/env python
 
-# from external module
 import numpy as np
-
-# from this directory
+# others
 import local
 import tools_cmb
 
-kwargs_ov   = {\
-    'overwrite':True, \
-    'verbose':True \
-}
+# define parameters
+snmax = 1000
+kwargs_ov = {'overwrite':False,'verbose':True}
 
-kwargs_glob = {\
-    'snmin':1, \
-    'snmax':100, \
-}
+# Read CMB survey masks
+pobj = local.analysis()
+cobj = tools_cmb.cmb_map()
 
-kwargs_cmb  = {\
-    't':'id', \
-}
+# generate noise alms
+tools_cmb.compute_cmb_noise(cobj,snmax,**kwargs_ov)
 
-#run = ['alm','aps']
-run = ['aps']
+# generate tensor alms
+tools_cmb.compute_cmb_tensor(pobj,cobj,snmax,**kwargs_ov)
 
-# //// Main calculation ////#
-tools_cmb.interface(kwargs_glob=kwargs_glob,kwargs_ov=kwargs_ov,kwargs_cmb=kwargs_cmb,run=run)
+#////////// Wiener-filtered E-mode for lensing template //////////#
+kwargs_ov = {'overwrite':True,'verbose':True}
+tools_cmb.compute_wiener_highl(pobj,cobj,snmax,**kwargs_ov)
+
+#////////// Wiener-filtered B-mode on large scale //////////#
+tools_cmb.compute_wiener_lowl(pobj,cobj,snmax,**kwargs_ov)
+
