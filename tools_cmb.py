@@ -1,448 +1,273 @@
-# map -> alm
+# Module for Multitracers
 import numpy as np
 import healpy as hp
 import pickle
-import os
-import sys
 import tqdm
+import warnings
+warnings.filterwarnings("ignore")
 
-# from cmblensplus/wrap/
+# from cmblensplus/wrap
 import curvedsky as cs
 
-# from cmblensplus/utils/
-import constants
-import cmb
+# from cmblensplus/utils
+import constant as c
 import misctools
+import cmb
 
-# local
+# from local module
 import local
 
+# //// Fixed values //// #
 
-# LiteBIRD instrumental parameters
-INST = {}
-INST['LFT'] = { \
-        '40': (70.5,37.42), \
-        '50': (58.5,33.46), \
-        '60': (51.1,21.31), \
-       '68a': (41.6,19.91), \
-       '68b': (47.1,31.77), \
-       '78a': (36.9,15.55), \
-       '78b': (43.8,19.13), \
-       '89a': (33.0,12.28), \
-       '89b': (41.5,28.77), \
-       '100': (30.2,10.34), \
-       '119': (26.3, 7.69), \
-       '140': (23.7, 7.25) 
-    }
-INST['MFT'] = { \
-       '100': (37.8,8.48), \
-       '119': (33.6,5.70), \
-       '140': (30.8,6.38), \
-       '166': (28.9,5.57), \
-       '195': (28.0,7.05)
-    }
-INST['HFT'] = { \
-       '195': (28.6,10.50), \
-       '235': (24.7,10.79), \
-       '280': (22.5,13.80), \
-       '337': (20.9,21.95), \
-       '402': (17.9,47.45)
-    }
-INST['id']  = {'com': (30.,3.)}
-INST['ALL'] = {'com': ('','')}
+masks = {'lbs4','lbonly'}
+
+theta = {'lb':30.,'s4':2.}
+sigma = {'lb':2.,'s4':1.} # uK-arcmin in polarization
 
 
-# Define parameters and filename for CMB map
-class cmb_anisotropies:
+# //// Derived products //// #
 
-    def __init__(self,t='id',ntype='white',wind='G70',ascale=5.,fltr='none',lmin=2,lmax=1024,nside=512):
+class cmb_map():
+    '''
+    Derived products for CMB
+    '''
+    
+    def __init__( self ):
 
-        #//// get parameters ////#
-        # specify telescope (t)
-        # LFT/MFT/HFT --- individual telescope
-        # comb --- component separated map
-        # id --- idealistic fullsky cmb, isotropic noise
-        self.telescope = t
-        self.freqs = list(INST[t].keys())
-        if self.telescope not in ['id','ALL']:  self.freqs.append('com')
-
-        # CMB alms filtering
-        self.fltr   = fltr
-        if self.telescope == 'id':  self.fltr = 'none'
-            
-        # window
-        self.wind   = wind
-        if self.telescope == 'id':  self.wind = 'fullsky'
-
-        # apodization scale
-        self.ascale = ascale
-        if self.telescope == 'id':  self.ascale = 0.
-
-        # CMB map noise type
-        self.ntype = ntype
-        
-        # minimum/maximum multipoles of CMB alms
-        self.lmin  = lmin
-        self.lmax  = lmax
-        
-        # map resolution
-        self.nside = nside
-        self.npix  = 12*self.nside**2
-
-        #//// tags for filename ////#
-        # type of window
-        if self.fltr == 'cinv':
-            wftag = '_'+self.fltr
-        else:
-            wftag = '_' + self.wind + '_a'+str(self.ascale)+'deg'
-        
-        # specify CMB map
-        self.stag = {freq: self.telescope + freq + '_' + self.ntype + wftag for freq in self.freqs}
-
-        #//// Filenames ////#
-        ids = local.ids.copy()
-        
-        # cmb map, alm and aps
+        #set directory
         d = local.data_directory()
-        d_alm = d['cmb'] + 'alm/'
-        d_aps = d['cmb'] + 'aps/'
-        d_map = d['cmb'] + 'map/'
+ 
+        # noise alms
+        self.fnalm = [ d['cmb'] + 'alm/nalm_' + str(rlz) + '.pkl' for rlz in local.ids ]
         
-        #cmb signal map
-        self.fscmb = {freq: [d_map+'/cmb_uKCMB_'+t+freq+'_nside'+str(nside)+'_'+x+'.fits' for x in ids] for freq in self.freqs}
-
-        #cmb noise map
-        self.fnois = {freq: [d_map+'/noise_uKCMB_'+t+freq+'_'+ntype+'_nside'+str(nside)+'_'+x+'.fits' for x in ids] for freq in self.freqs}
+        # tensor alms
+        self.fralm = [ d['cmb'] + 'alm/ralm_' + str(rlz) + '.pkl' for rlz in local.ids ]
         
-        #cmb alm/aps
-        self.falms, self.fcl, self.fmcl = {}, {}, {}
-        for freq in self.freqs:
-            self.falms[freq], self.fcl[freq], self.fmcl[freq] = {}, {}, {}
-            for s in ['s','n','o']:
-                self.falms[freq][s] = {}
-                for m in ['T','E','B']:
-                    if s=='s': # remove noise type for signal
-                        Stag = self.stag[freq].replace('_'+ntype,'')
-                    else:
-                        Stag = self.stag[freq]
-                    self.falms[freq][s][m] = [d_alm+'/'+s+'_'+m+'_'+Stag+'_'+x+'.pkl' for x in ids]
-                self.fcl[freq][s]  = [d_aps+'/rlz/cl_'+Stag+'_'+s+'_'+x+'.dat' for x in ids]
-                self.fmcl[freq][s] = d_aps+'/mcl_'+Stag+'_'+s+'.dat'
+        # Wiener-filtered CMB E and B modes (used for lensing template)
+        self.fwalm = { m: [ d['cmb'] + 'alm/walm_' + m + '_' + str(rlz) + '.pkl' for rlz in local.ids ] for m in masks }
+
+        # Wiener-filtered CMB B-modes on large scale (to be delensed)
+        self.foblm = { m: [ d['cmb'] + 'alm/oblm_' + m + '_' + str(rlz) + '.pkl' for rlz in local.ids ] for m in masks }
 
 
-    #-------------------------
-    # LiteBIRD beam
-    #-------------------------
+# //// Utilities //// #
 
-    def get_beam(self): # Return Gaussian beam function
-        # get fwhm
-        self.theta = np.array( [ x[0] for x in list(INST[self.telescope].values()) ] )
-        # compute 1D Gaussian beam function from cmblensplus/utils/cmb.py
-        self.bl = {freq: cmb.beam(self.theta[n],self.lmax,inv=False) for n, freq in enumerate(self.freqs)}
+def prepare_cmb_Ncov(lmax):
+    Ncov = np.zeros((4,4,lmax+1))
+    Ncov[0,0,:] = Ncov[1,1,:] = (sigma['lb']*c.ac2rad/c.Tcmb)**2
+    Ncov[2,2,:] = Ncov[3,3,:] = (sigma['s4']*c.ac2rad/c.Tcmb)**2
+    return Ncov
 
-    #-------------------------
-    # LiteBIRD white nosie level
-    #-------------------------
+def prepare_beam(lmax):
+    bl = np.zeros((2,lmax+1))
+    bl[0] = cmb.beam(theta['lb'],lmax,inv=False)
+    bl[1] = cmb.beam(theta['s4'],lmax,inv=False)
+    return bl
 
-    def get_noise_spec(self):
-        self.sigma = np.array( [ x[1] for x in list(INST[self.telescope].values()) ] )
-        # white noise spectrum    
-        self.nl = {}
-        for n, freq in enumerate(self.freqs):
-            self.nl[freq] = np.zeros((4,self.lmax+1))
-            self.nl[freq][0,:] = .5*(self.sigma[n]*cmb.ac2rad/cmb.Tcmb)**2
-            self.nl[freq][1,:] = 2*self.nl[freq][0,:]
-            self.nl[freq][2,:] = 2*self.nl[freq][0,:]
-            
 
-    def create_freq_map(self,glob,overwrite=True,verbose=False):
-        # transform SO alms to a frequency map which is convolved by a Gaussian beam
+def prepare_masks(nside=None):
+    
+    params = local.analysis()
+
+    W_LB = hp.read_map(params.wind['litebird'])
+    W_S4 = W_LB * hp.read_map(params.wind['cmbs4'])
+
+    mask = {}
+    mask['lbs4']   = W_S4
+    mask['lbonly'] = W_LB*(1.-W_S4)
+    
+    if nside is not None:
+
+        for m in masks:
+            mask[m] = hp.ud_grade(mask[m],nside)
+            mask[m][mask[m]<1.] = 0.
+    
+    return mask
+
+
+def qumap_smoothing(iQ,iU,lmax,nside,bl=None):
+
+    alm = hp.sphtfunc.map2alm(np.array((0*iQ,iQ,iU)), lmax=lmax, pol=True)
+    
+    # beam smearing
+    if bl is not None:
+        alm[1] = hp.sphtfunc.almxfl(alm[1,:], bl)
+        alm[2] = hp.sphtfunc.almxfl(alm[2,:], bl)
         
-        self.get_beam()
-        
-        for freq in self.freqs:
-            
-            for i in tqdm.tqdm(glob.rlz):
+    __, Q, U = hp.sphtfunc.alm2map(alm, nside, lmax=lmax, pixwin=True, pol=True)
+    
+    return Q, U
 
-                alms = hp.read_alm(glob.ficmb[i],hdu=(1,2,3))
+
+def prepare_obs_Bmap(pobj,rlz):
+
+    # compute observed B-mode
+    Qn = hp.read_map(pobj.ffgs[rlz],field=1)/c.Tcmb
+    Un = hp.read_map(pobj.ffgs[rlz],field=2)/c.Tcmb
+    # nan to zero
+    Qn[np.isnan(Qn)] = 0
+    Un[np.isnan(Un)] = 0
+    NSIDE = hp.get_nside(Qn)
+
+    Qs = hp.read_map(pobj.ficmb[rlz],field=1)/c.Tcmb
+    Us = hp.read_map(pobj.ficmb[rlz],field=2)/c.Tcmb
+    nside = hp.get_nside(Qs)
+    
+    lbmax = 4*NSIDE
+    sElm, sBlm = cs.utils.hp_map2alm_spin(nside,lbmax,lbmax,2,Qs,Us)
+    nBlm  = cs.utils.hp_map2alm_spin(NSIDE,lbmax,lbmax,2,Qn,Un)[1]
+    sBmap = cs.utils.hp_alm2map(NSIDE,lbmax,lbmax,sBlm)
+    nBmap = cs.utils.hp_alm2map(NSIDE,lbmax,lbmax,nBlm)
+    oBmap = sBmap + nBmap
+    
+    return sBmap, nBmap, oBmap, sBlm
+    
+
+def compute_cmb_noise(cobj,snmax,lmax=1024,**kwargs_ov):
+    '''
+    Generate noise alms
+    '''
+    
+    # noise covariance
+    Ncov = prepare_cmb_Ncov(lmax)
+
+    for rlz in tqdm.tqdm(local.rlz(1,snmax),ncols=100,desc='rlz (cmb noise)'):
+
+        if misctools.check_path(cobj.fnalm[rlz],**kwargs_ov): continue
             
-                Talm = cs.utils.lm_healpy2healpix( alms[0], 5100 ) [:self.lmax+1,:self.lmax+1] / cmb.Tcmb * self.bl[freq][:,None]
-                Ealm = cs.utils.lm_healpy2healpix( alms[1], 5100 ) [:self.lmax+1,:self.lmax+1] / cmb.Tcmb * self.bl[freq][:,None]
-                Balm = cs.utils.lm_healpy2healpix( alms[2], 5100 ) [:self.lmax+1,:self.lmax+1] / cmb.Tcmb * self.bl[freq][:,None]
+        nlm = cs.utils.gaussalm(Ncov)
+        pickle.dump( (nlm), open(cobj.fnalm[rlz],"wb"), protocol=pickle.HIGHEST_PROTOCOL )
+
+
+def compute_cmb_tensor(pobj,cobj,snmax,ltmax=200,**kwargs_ov):
+    '''
+    Generate tensor alms
+    '''
+
+    for rlz in tqdm.tqdm(local.rlz(1,snmax),ncols=100,desc='rlz (cmb tensor)'):
+
+        if misctools.check_path(cobj.fralm[rlz],**kwargs_ov): continue
             
-                T = cs.utils.hp_alm2map(self.nside, self.lmax, self.lmax, Talm)
-                Q, U = cs.utils.hp_alm2map_spin(self.nside, self.lmax, self.lmax, 2, Ealm, Balm)
-            
-                hp.fitsfunc.write_map(self.fscmb[freq][i],np.array((T,Q,U)),overwrite=overwrite)
+        rlm = cs.utils.gauss1alm(ltmax,pobj.tcl[2,:ltmax+1])
+        pickle.dump( (rlm), open(cobj.fralm[rlz],"wb"), protocol=pickle.HIGHEST_PROTOCOL )
+        
 
     
-    def create_white_noise_map(self,glob,overwrite=True,verbose=False):
+def compute_wiener_highl(pobj,cobj,snmax,nside=512,lmax=1024,**kwargs_ov):
 
-        self.get_noise_spec()
-        
-        for freq in self.freqs:
-            
-            for i in tqdm.tqdm(glob.rlz):
+    # set parameters
+    npix = hp.nside2npix(nside)
 
-                Talm = cs.utils.gauss1alm(self.lmax,self.nl[freq][0,:])
-                Ealm = cs.utils.gauss1alm(self.lmax,self.nl[freq][1,:])
-                Balm = cs.utils.gauss1alm(self.lmax,self.nl[freq][2,:])
-            
-                T = cs.utils.hp_alm2map(self.nside, self.lmax, self.lmax, Talm)
-                Q, U = cs.utils.hp_alm2map_spin(self.nside, self.lmax, self.lmax, 2, Ealm, Balm)
-            
-                hp.fitsfunc.write_map(self.fnois[freq][i],np.array((T,Q,U)),overwrite=overwrite)
-
-
-            
-#---------------------------
-# Window function operation
-#---------------------------
-
-def window(wind,nside=None,ascale=0.):
-
-    # load window
-    if wind=='fullsky':
-        w = 1.
-    else:
-        fmask = local.data_directory()['win'] + wind + '_binary.fits'
-        if ascale!=0: fmask = fmask.replace('binary','a'+str(ascale)+'deg')
-        w = hp.fitsfunc.read_map(fmask,verbose=False)
-        if nside is not None:  
-            w = hp.pixelfunc.ud_grade(w,nside)
+    # get mask
+    Mask = prepare_masks(nside)
     
-    # normalization correction due to window
-    wn = cmb.wfactor(w)
-
-    return w, wn
-
-
-#-------------------------
-# map -> alm -> aps
-#-------------------------
-
-def map2alm(glob,cobj,freq,w,mtype=['T','E','B'],kwargs_ov={}):
-
+    # noise covariance
+    Ncov = prepare_cmb_Ncov(lmax)
+    
     # beam
-    cobj.get_beam()
+    bl = prepare_beam(lmax)
 
-    # map -> alm
-    for i in tqdm.tqdm(glob.rlz,ncols=100,desc='map2alm (freq='+freq+')'):
-
-        if misctools.check_path([cobj.falms[freq]['o']['T'][i],cobj.falms[freq]['o']['E'][i],cobj.falms[freq]['o']['B'][i]],**kwargs_ov): continue
-
-        salm = cmb.map2alm_curvedsky(cobj.lmax,cobj.fscmb[freq][i],w=w,bl=cobj.bl[freq])
-        nalm = cmb.map2alm_curvedsky(cobj.lmax,cobj.fnois[freq][i],w=w,bl=cobj.bl[freq])
-
-        oalm = {}
-        for m in mtype:
-            oalm[m] = salm[m] + nalm[m]
-
-        # save to files
-        for m in mtype:
-            pickle.dump((oalm[m]),open(cobj.falms[freq]['o'][m][i],"wb"),protocol=pickle.HIGHEST_PROTOCOL)
-            pickle.dump((nalm[m]),open(cobj.falms[freq]['n'][m][i],"wb"),protocol=pickle.HIGHEST_PROTOCOL)
-            pickle.dump((salm[m]),open(cobj.falms[freq]['s'][m][i],"wb"),protocol=pickle.HIGHEST_PROTOCOL)
-
-
-def alm_comb_freq(rlz,fcmbfreq,fcmbcomb,verbose=True,overwrite=False,freqs=['93','145','225'],mtype=[(0,'T'),(1,'E'),(2,'B')],roll=2):
+    # kwargs for cinv
+    kwargs_cinv = {'chn':1,'itns':[1000],'eps':[1e-4],'ro':10,'stat':'status_wiener_highl.txt'}
     
-    for i in tqdm.tqdm(rlz,ncols=100,desc='alm combine'):
-
-        for (mi, m) in mtype:
-
-            if misctools.check_path(fcmbcomb.alms['o'][m][i],overwrite=overwrite,verbose=verbose): continue
-
-            salm, nalm, Wl = 0., 0., 0.
-            for freq in freqs:
-                Nl = np.loadtxt(fcmbfreq[freq].scl['n'],unpack=True)[mi+1]
-                Nl[0:2] = 1.
-                Il = 1./Nl
-                salm += pickle.load(open(fcmbfreq[freq].alms['s'][m][i],"rb"))*Il[:,None]
-                nalm += pickle.load(open(fcmbfreq[freq].alms['n'][m][i],"rb"))*Il[:,None]
-                Wl   += Il
-            salm /= Wl[:,None]
-            nalm /= Wl[:,None]
-            oalm = salm + nalm
-
-            # remove low-ell for roll-off effect
-            if roll > 2:
-                oalm[:roll,:] = 0.
-
-            pickle.dump((salm),open(fcmbcomb.alms['s'][m][i],"wb"),protocol=pickle.HIGHEST_PROTOCOL)
-            pickle.dump((nalm),open(fcmbcomb.alms['n'][m][i],"wb"),protocol=pickle.HIGHEST_PROTOCOL)
-            pickle.dump((oalm),open(fcmbcomb.alms['o'][m][i],"wb"),protocol=pickle.HIGHEST_PROTOCOL)
-
-
-
-def aps(glob,cobj,freq,w2,stype=['o','s','n'],mtype=['T','E','B'],**kwargs_ov):
-
-    # compute aps for each rlz
-    L = np.linspace(0,cobj.lmax,cobj.lmax+1)
-    
-    for s in stype:
+    # loop over realizations
+    for rlz in tqdm.tqdm(local.rlz(1,snmax),ncols=100,desc='rlz (cmb wiener high-l)'):
         
-        if misctools.check_path(cobj.fcl[freq][s],**kwargs_ov): continue
-        
-        if kwargs_ov['verbose']: print('stype =',s)
-        
-        cl = cmb.aps(glob.rlz,cobj.lmax,cobj.falms[freq][s],odd=False,mtype=mtype,**kwargs_ov,w2=w2,fname=cobj.fcl[freq][s])
+        nlm = pickle.load(open(cobj.fnalm[rlz],"rb"))
 
-        # save average to files
-        mcl = np.mean(cl,axis=0)
-        vcl = np.std(cl,axis=0)
-        np.savetxt(cobj.fmcl[freq][s],np.concatenate((L[None,:],mcl,vcl)).T)
+        smap = None
 
+        for m in masks:
 
-#////////////////////////////////////////////////////////////////////////////////
-# Wiener filter
-#////////////////////////////////////////////////////////////////////////////////
+            if misctools.check_path(cobj.fwalm[m][rlz],**kwargs_ov): continue
 
-class wiener_objects(cmb_anisotropies):
-
-    def __init__(self,tqu):
-
-        self.tqu  = tqu
-        self.maps = np.zeros((tqu,len(self.freqs),self.npix))
-        self.invN = np.zeros((tqu,len(self.freqs),self.npix))
-        self.calm = self.falm['com']['o'] # output alm
-
-        # load hit count map
-        self.W = hitmap(self.telescope,self.nside)
-        
-        # load survey boundary
-        self.M, __ = window(self.wind,nside=self.nside,ascale=0.)
-        
-
-    def load_maps(self,rlz,verbose=False): # T or Q/U maps are loaded 
-
-        for ki, freq in enumerate(self.freqs):
-        
-            if self.tqu == 1:
+            if smap is None: # only one time calculation
             
-                Ts = hp.fitsfunc.read_map(self.fscmb[freq][rlz],field=0,verbose=verbose)
-                Tn = hp.fitsfunc.read_map(self.fnois[freq][rlz],field=0,verbose=verbose)
-                self.maps[0,ki,:] = self.M * hp.pixelfunc.ud_grade(Ts+Tn,self.nside)/cmb.Tcmb
-        
-            if self.tqu == 2:
-        
-                Qs = hp.fitsfunc.read_map(self.fscmb[freq][rlz],field=1,verbose=verbose)
-                Us = hp.fitsfunc.read_map(self.fscmb[freq][rlz],field=2,verbose=verbose)
-                Qn = hp.fitsfunc.read_map(self.fnois[freq][rlz],field=1,verbose=verbose)
-                Un = hp.fitsfunc.read_map(self.fnois[freq][rlz],field=2,verbose=verbose)
+                nmap = np.zeros((2,2,npix))
+                nmap[0,0,:], nmap[1,0,:] = cs.utils.hp_alm2map_spin(nside,lmax,lmax,2,nlm[0],nlm[1])
+                nmap[0,1,:], nmap[1,1,:] = cs.utils.hp_alm2map_spin(nside,lmax,lmax,2,nlm[2],nlm[3])
 
-                self.maps[0,ki,:] = self.M * hp.pixelfunc.ud_grade(Qs+Qn,self.nside)/cmb.Tcmb
-                self.maps[1,ki,:] = self.M * hp.pixelfunc.ud_grade(Us+Un,self.nside)/cmb.Tcmb
+                Q, U = hp.read_map(pobj.ficmb[rlz],field=(1,2))/c.Tcmb
+                Elm, Blm = cs.utils.hp_map2alm_spin(hp.get_nside(Q),lmax,lmax,2,Q,U)
 
+                smap = np.zeros((2,2,npix))
+                smap[0,0,:], smap[1,0,:] = cs.utils.hp_alm2map_spin(nside,lmax,lmax,2,Elm*bl[0],Blm*bl[0])
+                smap[0,1,:], smap[1,1,:] = cs.utils.hp_alm2map_spin(nside,lmax,lmax,2,Elm*bl[1],Blm*bl[1])
 
-    def load_invN(self):  # inv noise covariance
+            # observed cmb maps
+            data = (smap+nmap) * Mask[m]
+            invN = np.zeros((2,2,npix))
+            invN[:,0,:] = Mask[m]/Ncov[0,0,0]
+            invN[:,1,:] = Mask[m]/Ncov[2,2,0]
+            wElm, wBlm = cs.cninv.cnfilter_freq(2,2,nside,lmax,pobj.lcl[1:3,:lmax+1],bl,invN,data,**kwargs_cinv)
 
-        for ki, sigma in enumerate(self.sigma):
-
-            self.invN[0,ki,:] = self.W * (sigma*(np.pi/10800.)/cmb.Tcmb)**(-2)
-
-            if self.tqu == 2:
-                self.invN[:,ki,:] /= 2.
-                self.invN[1,ki,:] = self.invN[0,ki,:]
-
-
-
-def cinv_core(i,wobj,cl,lTmax=1000,lTcut=100,**kwargs):
-
-    # number of frequencies
-    mn  = len(wobj.freqs) - 1
+            pickle.dump( (wElm,wBlm), open(cobj.fwalm[m][rlz],"wb"), protocol=pickle.HIGHEST_PROTOCOL )
     
-    # load maps
-    wobj.load_maps(i)
 
-    if wobj.tqu==1: # temperature only case
-        cl[0,:lTcut+1] = 0.
-        Tlm = cs.cninv.cnfilter_freq(1,mn,wobj.nside,wobj.lmax,cl[0:1,:],wobj.bl,wobj.invN,wobj.maps,**kwargs)
+def compute_wiener_lowl(pobj,cobj,snmax,nside=128,lmax=190,**kwargs_ov):
+
+    # get mask
+    Mask = prepare_masks(nside)
+
+    # get beam and pixel window function for large scale B-modes
+    bl = cmb.beam(80.,lmax,inv=False) # 80 arcmin beam to match the PTEP FG sims
+    wl = hp.sphtfunc.pixwin(nside,lmax=lmax)
+    
+    # loop over realizations
+    for rlz in tqdm.tqdm(local.rlz(1,snmax),ncols=100,desc='rlz (cmb wiener low-l)'):
+
+        Qs = None
+
+        for m in masks:
+
+            if misctools.check_path(cobj.foblm[m][rlz],**kwargs_ov): continue
+
+            if Qs is None: # only one time calculation
+            
+                # lensed Q/U map
+                Q, U = hp.read_map(pobj.ficmb[rlz],field=(1,2))/c.Tcmb
+                Qs, Us = qumap_smoothing(Q,U,lmax,nside,bl)
+            
+                # tensor Q/U map
+                rlm = pickle.load(open(cobj.fralm[rlz],"rb"))[:lmax+1,:lmax+1]
+                Qr, Ur = cs.utils.hp_alm2map_spin(nside,lmax,lmax,2,0*rlm,rlm)
+                Qr, Ur = qumap_smoothing(Qr,Ur,lmax,nside,bl)
+
+                # FG noise map
+                Qn = hp.ud_grade(hp.read_map(pobj.ffgs[rlz],field=1)/c.Tcmb,nside)
+                Un = hp.ud_grade(hp.read_map(pobj.ffgs[rlz],field=2)/c.Tcmb,nside)
+                Qn[np.isnan(Qn)] = 0
+                Un[np.isnan(Un)] = 0
+
+                inls = np.array((1./pobj.clfg[:lmax+1],1./pobj.clfg[:lmax+1])).reshape(2,1,lmax+1)
+
+            wBlm = qumap_filter(Qs+Qn,Us+Un,Mask[m],pobj.lcl,inls,bl*wl)[1]
+            rBlm = qumap_filter(Qr,Ur,Mask[m],pobj.lcl,inls,bl*wl)[1]
+            pickle.dump( (wBlm,rBlm), open(cobj.foblm[m][rlz],"wb"), protocol=pickle.HIGHEST_PROTOCOL )
+
         
-        # output alms
-        pickle.dump((Tlm),open(wobj.falm['T'][i],"wb"),protocol=pickle.HIGHEST_PROTOCOL)
-
-    if wobj.tqu==2: # polarization only case
-        Elm, Blm = cs.cninv.cnfilter_freq(2,mn,wobj.nside,wobj.lmax,cl[1:3,:],wobj.bl,wobj.invN,wobj.maps,**kwargs)
-
-        # output alms
-        pickle.dump((Elm),open(wobj.falm['E'][i],"wb"),protocol=pickle.HIGHEST_PROTOCOL)
-        pickle.dump((Blm),open(wobj.falm['B'][i],"wb"),protocol=pickle.HIGHEST_PROTOCOL)
-
-
-
-def cinv(tqu,glob,cobj,overwrite=False,verbose=False,**kwargs):
-
-    # prepare objects for wiener filtering
-    wobj = wiener_objects(cobj)
-    wobj.load_invN()
-
-    # start loop for realizations
-    for i in tqdm.tqdm(glob.rlz,ncols=100,desc='cinv'):
-
-        if misctools.check_path([wobj.falm['T'][i],wobj.falm['E'][i],wobj.falm['B'][i]],overwrite=overwrite): continue
-
-        cinv_core(i,wobj,glob.lcl[:4,:cobj.lmax+1],verbose=verbose,**kwargs)
-
-
-def load_cl(filename,lTmin=None,lTmax=None):
-
-    print('loading TT/EE/BB/TE from pre-computed spectrum:',filename)
+def qumap_filter(Q,U,M,lcl,inls,beam): 
+    # Wiener filter for large-scale B-modes
     
-    cls = np.loadtxt(filename,unpack=True,usecols=(1,2,3,4))
+    NSIDE = hp.get_nside(Q)
+    NPIX  = hp.nside2npix(NSIDE)
+
+    data = np.array((Q*M,U*M)).reshape((2,1,NPIX))
+    invN = np.array((M,M)).reshape((2,1,NPIX))
     
-    if lTmin is not None:  cls[0,:lTmin] = 1e30
-    if lTmax is not None:  cls[0,lTmax+1:] = 1e30
+    lmax = len(beam) - 1
+    bls = np.array((beam)).reshape((1,lmax+1))
+
+    kwargs_cinv = {
+        'chn':  1, \
+        'eps':  [1e-4], \
+        'itns': [1000], \
+        'ro':   10, \
+        'inl':  inls, \
+        'stat': 'status_wiener_lowl.txt' \
+    }
     
-    return cls
+    return cs.cninv.cnfilter_freq(2,1,NSIDE,lmax,lcl[1:3,:lmax+1],bls,invN,data,**kwargs_cinv)
 
 
-def interface(kwargs_glob={},kwargs_ov={},kwargs_cmb={},run=[],mtype=['T','E','B']):
 
-    glob = local.analysis(**kwargs_glob)
-    cobj = cmb_anisotropies(**kwargs_cmb)                    
-
-    if cobj.fltr == 'none':
-
-        if cobj.telescope == 'id': # map -> alm for fullsky case
-            w, wn = 1., np.ones(5)
-        else:
-            # load survey window
-            w, wn = local.window(wind,ascale=cobj.ascale) 
-
-        # map -> alm for each freq
-        for freq in cobj.freqs:
-            # define map object
-            # map -> alm
-            if 'alm' in run:
-                map2alm(glob,cobj,freq,w,mtype=mtype,kwargs_ov=kwargs_ov)
-            # alm -> aps
-            if 'aps' in run:
-                aps(glob,cobj,freq,wn[2],mtype=mtype,**kwargs_ov)
-
-        # combine alm over freqs
-        if cobj.telescope != 'id':
-            # define map object for coadd
-            # map -> alm
-            if 'alm' in run:
-                alm_comb_freq(glob,cobj,**kwargs_ov)
-            # alm -> aps
-            if 'aps' in run: # compute for freq=com
-                aps(glob,cobj,'com',wn[2],mtype=mtype,**kwargs_ov)
-
-
-    elif kwargs_cmb['fltr'] == 'cinv':  # full wiener filtering
-
-        __, wn = local.window(cobj.wind,ascale=cobj.ascale) 
-        
-        # Polarization
-        cinv_params = {\
-            'chn' : 1, \
-            'eps' : [1e-4], \
-            'lmaxs' : [cobj.lmax], \
-            'nsides' : [cobj.nside], \
-            'itns' : [1000], \
-            'ro' : 1, \
-            'filter' : 'W' \
-        }
-        cinv(2,glob,cobj,**cinv_params,**kwargs_ov)

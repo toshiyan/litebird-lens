@@ -6,9 +6,11 @@ import tqdm
 from astropy import units as u
 
 # from cmblensplus/wrap
+import basic
 import curvedsky as cs
 
 # from cmblensplus/utils
+import constant as c
 import misctools
 import cmb
 import quad_func
@@ -16,132 +18,221 @@ import delens_func
 
 # from local module
 import local
-import tools_cmb
-import tools_lens
+
+
+# //// Fixed values //// #
+
+# galaxy survey parameters
+def galaxy_distribution( zi, survey=['euc','lss'], zbn={'euc':5,'lss':5}, z0={'euc':.9/np.sqrt(2.),'lss':.311}, nz_b={'euc':1.5,'lss':1.}, sig={'euc':.05,'lss':.05}):
+    
+    zbin, dndzi, pz = {}, {}, {}
+
+    if zbn['euc']==5:
+        zbin['euc'] = np.array([0.,.8,1.5,2.,2.5,6.])
+    if zbn['lss']==5:
+        zbin['lss'] = np.array([0.,.5,1.,2.,3.,6.])
+    if zbn['lss']==6:
+        zbin['lss'] = np.array([0.,.5,1.,2.,3.,4.,7.])
+
+    for s in survey:
+        dndzi[s] = basic.galaxy.dndz_sf(zi,2.,nz_b[s],z0=z0[s])
+        if s=='euc' and zbn['euc']!=5:  zbin[s]  = basic.galaxy.zbin(zbn[s],2.,nz_b[s],z0=z0[s])
+        pz[s]    = {zid: basic.galaxy.photoz_error(zi,[zbin[s][zid],zbin[s][zid+1]],sigma=sig[s],zbias=0.) for zid in range(zbn[s])}
+
+    # fractional number density
+    frac = {}
+    for s in survey:
+        frac[s] = {zid: np.sum(dndzi[s]*pz[s][zid])/np.sum(dndzi[s]) for zid in range(zbn[s]) }
+    
+    return zbin, dndzi, pz, frac
+
+
+
+def tracer_list(add_cmb=['klb','ks4'], add_euc=5, add_lss=5, add_cib=True):
+    
+    # construct list of mass tracers to be combined
+    klist = {}
+
+    # store id for cmb lensing maps
+    kid = 0
+    for k in add_cmb:
+        klist[kid] = k
+        kid += 1
+
+    # store id for cib maps
+    if add_cib: 
+        klist[kid] = 'cib'
+        kid += 1
+        
+    # store id for Euclid galaxy maps
+    for z in range(add_euc):
+        klist[kid] = 'euc'+str(z+1)+'n'+str(add_euc)
+        kid += 1
+
+    # store id for Euclid galaxy maps
+    for z in range(add_lss):
+        klist[kid] = 'lss'+str(z+1)+'n'+str(add_lss)
+        kid += 1
+
+    return klist
+
+        
+#//// Load analytic spectra and covariance ////#
+
+def tracer_filename(m0,m1):
+
+    return local.data_directory()['mas'] + 'spec/cl'+m0+m1+'.dat'
+
+
+def read_camb_cls(lmax=2048,lminI=100,return_klist=False,**kwargs):
+
+    klist = tracer_list(**kwargs)
+    
+    # load cl of mass tracers
+    cl = {}    
+    for I, m0 in klist.items():
+        for J, m1 in klist.items():
+            if J<I: continue
+            l, cl[m0+m1] = np.loadtxt( tracer_filename(m0,m1) )[:,:lmax+1]
+
+            # remove low-ell CIB
+            if m0=='cib' or m1=='cib':
+                cl[m0+m1][:lminI] = 1e-20
+
+    if return_klist:
+        return l, cl, klist
+    else:
+        return l, cl
+        
+
+def get_covariance_signal(lmax,lmin=1,lminI=100,**kwargs): 
+        # signal covariance matrix
+
+        # read camb cls
+        l, camb_cls, klist = read_camb_cls(lminI=lminI,return_klist=True,**kwargs)
+        nkap = len(klist.keys())
+
+        # form covariance
+        Cov = np.zeros((nkap,nkap,lmax+1))
+        
+        for I, m0 in klist.items():
+            for J, m1 in klist.items():
+                if J<I: continue
+                Cov[I,J,lmin:] = camb_cls[m0+m1][lmin:lmax+1]
+                
+        # symmetrize
+        Cov = np.array( [ Cov[:,:,l] + Cov[:,:,l].T - np.diag(Cov[:,:,l].diagonal()) for l in range(lmax+1) ] ).T
+        
+        return Cov
+
+
+def get_spectrum_noise(lmax,lminI=100,nu=353.,return_klist=False,frac=None,**kwargs):
+    
+    klist = tracer_list(**kwargs)
+
+    l  = np.linspace(0,lmax,lmax+1)    
+    nl = {}
+    
+    #//// prepare reconstruction noise of LB and S4 ////#
+    #for experiment in ['litebird','s4']:
+    #    obj = local.forecast(experiment)
+    #    obj.compute_nlkk()
+
+    if 'klb' in klist.values():
+        obj = local.forecast('litebird')
+        nl['klb'] = obj.load_nlkk(Lmax=lmax)
+    
+    if 'ks4' in klist.values():
+        obj = local.forecast('s4')
+        nl['ks4'] = obj.load_nlkk(Lmax=lmax)
+
+    if 'cib' in klist.values():
+        Jysr = c.MJysr2uK(nu)/c.Tcmb
+        nI = 2.256e-10
+        nl['cib'] = ( nI + .00029989393 * (1./(l[:lmax+1]+1e-30))**(2.17) ) * Jysr**2
+        nl['cib'][:lminI] = nl['cib'][lminI]
+
+    for m in klist.values():
+        if 'euc' in m:
+            if frac is None:
+                f = 1./kwargs['add_euc']
+            else:
+                f = frac['euc'][int(m[3])-1]
+            nl[m] = np.ones(lmax+1)*c.ac2rad**2/(30.*f)
+        if 'lss' in m:
+            if frac is None:
+                f = 1./kwargs['add_lss']
+            else:
+                f = frac['lss'][int(m[3])-1]
+            nl[m] = np.ones(lmax+1)*c.ac2rad**2/(40.*f)
+
+    for m in nl.keys():
+        nl[m][0] = 0.
+    
+    if return_klist:
+        return nl, klist
+    else:
+        return nl
+
+
+def get_covariance_noise(lmax,lminI=100,frac=None,**kwargs):
+    
+    nl, klist = get_spectrum_noise(lmax,lminI=lminI,return_klist=True,frac=frac,**kwargs)
+    nkap = len(klist.keys())
+
+    Ncov = np.zeros((nkap,nkap,lmax+1))
+
+    for I, m in enumerate(nl.keys()):
+        Ncov[I,I,:] = nl[m]
+ 
+    return Ncov
 
 
 class mass_tracer():
     # define object which has parameters and filenames for multitracer analysis
     
-    def __init__( self, qobj, lmin=5, lmax=2048, add_cmb=['EB'], add_gal=np.arange(3), add_cib=True ):
-        
-        # construct list of mass tracers to be combined
-        self.klist_cmb = {}
-        self.klist_gal = {}
-        self.klist_cib = {}
+    def __init__( self, lmin, lmax, add_cmb=['klb','ks4'], gal_zbn={'euc':5,'lss':5}, add_cib=True ):
 
-        # store id for cmb lensing maps
-        kid = 0
-        for k in add_cmb:
-            self.klist_cmb[k] = kid
-            kid += 1
-
-        # store id for galaxy maps
-        for z in add_gal:
-            self.klist_gal['g'+str(z)] = kid 
-            kid += 1
-
-        # store id for cib maps
-        if add_cib: 
-            self.klist_cib['cib'] = kid
-        
-        # define list of all mass tracers
-        self.klist = { **self.klist_cmb, **self.klist_gal, **self.klist_cib }
-
-        # define list of non-CMB mass tracers
-        self.klist_ext = { **self.klist_gal, **self.klist_cib }
-
-        # total number of mass tracer maps
-        self.nkap = len(self.klist)
-        
         # multipole range of the mass tracer
         self.lmin = lmin
         self.lmax = lmax
 
-        # noise curve for cmb lensing map
-        self.nlkk = {}
-        for k, n in self.klist_cmb.items():
-            self.nlkk[n] = np.zeros(lmax+1)
-            self.nlkk[n][:qobj.olmax+1] = np.loadtxt( qobj.f[k].al, unpack=True )[1]
-
+        # list of mass tracers
+        self.add_cmb = add_cmb
+        self.add_euc = gal_zbn['euc']
+        self.add_lss = gal_zbn['lss']
+        self.add_cib = add_cib
+        self.gal_zbn = gal_zbn
+        self.klist   = tracer_list(add_cmb=self.add_cmb, add_euc=self.add_euc, add_lss=self.add_lss, add_cib=self.add_cib)
+        
+        # total number of mass tracer maps
+        self.nkap = len(self.klist)
+        
         #set directory
         d = local.data_directory()
  
-        # cls
-        self.fspec = {spec: d['mas'] + 'spec/cl'+spec+'.dat' for spec in ['kk','II','gg','kI','kg','Ig']}
-
         # kappa alm of each mass tracer
         self.fklm = {}
-        for k in self.klist:
-            self.fklm[k] = [ d['mas'] + 'alm/' + k + '_' + str(i) + '.pkl' for i in local.ids ]
+        for m in self.klist.values():
+            self.fklm[m] = [ d['mas'] + 'alm/' + m + '_' + str(rlz) + '.pkl' for rlz in local.ids ]
         
         # kappa alm of combined mass tracer
-        self.tag   = qobj.cmbtag + qobj.bhe_tag + qobj.ltag + '_' + '-'.join(self.klist.keys())
-        self.fcklm = [ d['mas'] + 'alm/comb_' + self.tag + '_' + str(i) + '.pkl' for i in local.ids ]
-        self.fcovs = d['mas'] + 'cov/' + self.tag + '.pkl'
-
-
-    def load_mass_tracer_spectra(self,mass_clid):
-        data  = np.loadtxt(self.fspec[mass_clid])
-        cln   = len(data[1:,0])
-        cl    = np.zeros((cln,self.lmax+1))
-        ilmin = np.int(data[0,0])
-        ilmax = np.int(data[0,-1])
-        for l in range(self.lmin,self.lmax+1):
-            if l<ilmin or l>ilmax: continue
-            cl[:,l] = data[1:,l-ilmin]
-        return cl
-
-    
-    def get_spectra_matrix(self):
-        # currently correlations between galaxies of different z-bins are ignored
-        cl = {}
-        for clid in ['gg','kg','Ig','kk','II','kI']:
-            cl[clid] = self.load_mass_tracer_spectra(clid)
+        self.fwklm = [ d['mas'] + 'alm/wklm_' + str(rlz) + '.pkl' for rlz in local.ids ]
         
-        # used for generating sim
-        cl_matrix   = np.zeros( ( self.nkap, self.nkap, self.lmax+1) ) #Theory auto and cross spectra
 
-        # //// auto spectra //// #
-        for n in self.klist_cmb.values():
-            cl_matrix[n,n,:] = cl['kk'][0]
+    def cov_signal(self):
+        
+        return get_covariance_signal(self.lmax,lmin=self.lmin,add_euc=self.add_euc,add_lss=self.add_lss)
+
+    def gal_frac(self):
+        
+        return galaxy_distribution(np.linspace(0,50,1000),zbn=self.gal_zbn)[3]
     
-        for k, n in self.klist_gal.items():
-            z = int(k[1])
-            cl_matrix[n,n,:] = cl['gg'][z,:]
-    
-        for n in self.klist_cib.values():
-            cl_matrix[n,n,:] = cl['II'][0]
-
-        # //// cross spectra //// #
-        for n0 in self.klist_cmb.values():
-            for n1 in self.klist_cmb.values():
-                if n1 > n0: 
-                    continue
-                cl_matrix[n0,n1,:] = cl_matrix[n1,n0,:] = cl['kk'][0]
-    
-        for n0 in self.klist_cmb.values():
-            for j, n1 in self.klist_gal.items():
-                z = int(j[1])
-                cl_matrix[n0,n1,:] = cl_matrix[n1,n0,:] = cl['kg'][z,:]
-
-        for n0 in self.klist_cmb.values():
-            for n1 in self.klist_cib.values():
-                cl_matrix[n0,n1,:] = cl_matrix[n1,n0,:] = cl['kI']
-
-        for n0 in self.klist_cib.values():
-            for j, n1 in self.klist_gal.items():
-                z = int(j[1])
-                cl_matrix[n0,n1,:] = cl_matrix[n1,n0,:] = cl['Ig'][z,:]
-
-        self.signal_covariance = cl_matrix.copy()
-
-        # used for weights for coadding
-        clnl_matrix = cl_matrix.copy()
-        for n in self.klist_cmb.values():
-            clnl_matrix[n,n,:] += self.nlkk[n]
-
-        self.clnl_matrix = clnl_matrix.copy()
+    def cov_noise(self,frac=None):
+        
+        if frac is None: frac = self.gal_frac()
+        
+        return get_covariance_noise(self.lmax,frac=frac,add_euc=self.add_euc,add_lss=self.add_lss)
 
 
 #//// Load mass tracers ////#
@@ -165,143 +256,6 @@ def load_mass_tracers( rlz_index, qobj, mobj, mmask=None, kmask=None ):
     return alms
 
 
-#//// Generate alms from covariance matrix ////#
-
-def generate_tracer_alms( signal_covariance, iklm, num_of_kcmb, lmin):
-
-    # Calculate the weights and auxiliary spectra needed to generate Gaussian sims of individual tracers
-    aux_cl, A = calculate_sim_weights( signal_covariance, lmin, num_of_kcmb )
-
-    # Draw harmonic coefficients from Gaussian distributions with the calculated auxiliary spectra
-    a_alms = draw_gaussian_a_p( iklm, aux_cl, num_of_kcmb )
-
-    # Combine weights and coefficients to generate sims of individual tracers
-    tracer_alms = generate_individual_gaussian_tracers( a_alms, A, num_of_kcmb )
-
-    return tracer_alms
-
-
-def calculate_sim_weights( cl, lmin, num_of_kcmb ):
-    '''
-    Calculate the weights A_l^{ij} and the auxiliary spectra C_l^{ij}={C_l^{uu},C_l^{ee},...} from which the to draw the alm coefficients a_p={u_{lm},e_{lm},...}
-    The simulated alm has the form, alm = sum_{p=0}^i A^{ip} a^p, where a^p is the auxiliary alm. To abvoid completely degenerate case for CMB estimators,
-    we set A^{ip} = 0 for p within p > 0 and p < num of kcmb.
-    '''
-    num_of_tracers = len(cl[:,0,0]) 
-    num_of_multipoles = len(cl[0,0,:])
-    aux_cl = np.zeros( (num_of_tracers, num_of_multipoles) ) #Auxiliary spectra
-    A = np.zeros( (num_of_tracers,num_of_tracers,num_of_multipoles) ) #Weights for the alms
-
-    for j in range(num_of_tracers):
-
-        if 0<j<num_of_kcmb: continue
-        
-        for i in range(j,num_of_tracers):
-        
-            if 0<i<num_of_kcmb : continue
-
-            aux_cl[j,:] = np.nan_to_num(cl[j,j,:])
-            for p in range(j):
-                aux_cl[j] -= np.nan_to_num(A[j,p,:]**2 * aux_cl[p,:])
-
-            A[i,j,lmin:] = np.nan_to_num((1./aux_cl[j,lmin:])*cl[i,j,lmin:])
-            for p in range(j):
-                A[i,j,lmin:] -= np.nan_to_num((1./aux_cl[j,lmin:])*A[j,p,lmin:]*A[i,p,lmin:]*aux_cl[p,lmin:])
-    
-    return aux_cl, A
-
-
-def draw_gaussian_a_p(input_kappa_alm, aux_cl, num_of_kcmb):
-    '''
-    Draw a_p alms from distributions with the right auxiliary spectra.
-    '''
-    lmax = len(aux_cl[0,:]) - 1
-    num_of_tracers = len(aux_cl[:,0])
-    a_alms = np.zeros((num_of_tracers, lmax+1, lmax+1), dtype='complex128') #Unweighted alm components
-
-    a_alms[0:num_of_kcmb,:,:] = input_kappa_alm
-    for j in range(num_of_kcmb, num_of_tracers):
-        a_alms[j,:,:] = cs.utils.gauss1alm(lmax,aux_cl[j,:])
-
-    return a_alms
-
-
-def generate_individual_gaussian_tracers(a_alms, A, num_of_kcmb):
-    '''
-    Put all the weights and alm components together to give appropriately correlated tracers
-    '''
-    #num_of_tracers = len(a_alms[:,0])
-    num_of_tracers = len(a_alms[:,0,0])
-    #tracer_alms = np.zeros((num_of_tracers, len(a_alms[0,:])), dtype='complex128') #Appropriately correlated final tracers
-    tracer_alms = 0.*a_alms
-
-    for i in range(num_of_kcmb,num_of_tracers):
-        for j in range(i+1):
-            #tracer_alms[i,:] += hp.almxfl(a_alms[j,:], A[i,j,:])
-            tracer_alms[i,:,:] += a_alms[j,:,:] * A[i,j,:,None]
-
-    return tracer_alms
-
-
-#//// Combining multitracer alms ////#
-
-def coadd_kappa_alms(tracer_alms, weights):
-    # summing up mass tracer alms with appropriate weights
-    combined_kappa_alms = 0.*tracer_alms[0,:,:]
-    for index, individual_alms in enumerate(tracer_alms):
-        combined_kappa_alms +=  weights[index,:,None] * individual_alms
-    
-    return combined_kappa_alms
-
-
-
-def calculate_multitracer_weights_sim(glob,qobj,mobj,mmask=None,kmask=None,**kwargs_ov):
-    '''
-    Get covariance and weights from simulated alms
-    '''
-
-    lmin = mobj.lmin
-    lmax = mobj.lmax
-
-    if misctools.check_path(mobj.fcovs,**kwargs_ov): 
-        
-        vec, cov = pickle.load(open(mobj.fcovs,"rb"))
-    
-    else:
-
-        vec = np.zeros( ( len(glob.rlz), mobj.nkap, lmax+1 ) )
-        cov = np.zeros( ( len(glob.rlz), mobj.nkap, mobj.nkap, lmax+1 ) )
-    
-        for ii, i in enumerate(tqdm.tqdm(glob.rlz,ncols=100,desc='compute coeff')):
-
-            # load mass tracer alms
-            kalm = load_mass_tracers( i, qobj, mobj, mmask=mmask, kmask=kmask )
-
-            # load input kappa and multiply lens window
-            kilm = local.load_input_kappa( i, glob, lmax )
-
-            # compute auto and cross
-            vec[ii,:,:] = np.array([ cs.utils.alm2cl(lmax,kalm[ki,:,:],kilm) for ki in range(mobj.nkap) ])            
-            cov[ii,:,:,:] = cs.utils.alm2cov(kalm)
-
-        # compute weights as w = C^-1 V
-        pickle.dump( (vec,cov), open(mobj.fcovs,"wb"), protocol=pickle.HIGHEST_PROTOCOL )
-
-
-    weight = np.zeros( ( len(glob.rlz), mobj.nkap, lmax+1 ) )
-    
-    for ii, i in enumerate(tqdm.tqdm(glob.rlz,ncols=100,desc='compute weights')):
-    
-        mvec, mcov = np.mean(np.delete(vec,ii,0),axis=0),  np.mean(np.delete(cov,ii,0),axis=0)
-
-        for l in range(lmin,lmax+1):
-            for n in mobj.klist_cmb.values():
-                if mvec[n,l] == 0.: mcov[n,n,l] = 1. # for reconstructed lensing kappa above rlmax
-            weight[ii,:,l] = np.dot( np.linalg.inv(mcov[:,:,l]), mvec[:,l] )
-    
-    return weight
-
-
 #//// interface function ////#
 
 def interface( qobj, run=['gen_alm','comb'], kwargs_glob={}, kwargs_ov={}, kwargs_cmb={}, kwargs_mass={} ):
@@ -322,51 +276,21 @@ def interface( qobj, run=['gen_alm','comb'], kwargs_glob={}, kwargs_ov={}, kwarg
         else:
             mmask, kmask = W, None
 
-    # generate random gaussian alms of tracers
-    if 'gen_alm' in run:
+    # Calculate the optimal weights to form a multitracer map for delensing
+    weight = calculate_multitracer_weights_sim( glob, qobj, mobj, mmask=mmask, kmask=kmask, **kwargs_ov )
         
-        # load cl-matrix and covariance of alms
-        mobj.get_spectra_matrix()
-
-        # loop over realizations
-        for i in tqdm.tqdm(glob.rlz,ncols=100,desc='generating multitracer klms'):
-        
-            # load input phi alm and then convert it to kappa alm
-            iklm = local.load_input_kappa( i, glob, mobj.lmax )
-
-            # generate tracer alms
-            alms = generate_tracer_alms( mobj.signal_covariance, iklm, len(mobj.klist_cmb), mobj.lmin )
-
-            # save to files for external mass tracers
-            for k, n in mobj.klist_ext.items():
+    # loop over realizations to combine mass tracers with the above weight
+    for ii, i in enumerate(tqdm.tqdm(glob.rlz,ncols=100,desc='coadding multitracer')):
+            
+        if misctools.check_path(mobj.fcklm[i],**kwargs_ov): continue
                 
-                # check if file exist
-                if misctools.check_path( mobj.fklm[k][i], **kwargs_ov ): continue
-            
-                # save
-                pickle.dump( (alms[n,:,:]), open(mobj.fklm[k][i],"wb"), protocol=pickle.HIGHEST_PROTOCOL )
-            
-    # Co-add the individual tracers using the weights we just calculated
-    if 'comb' in run:
+        # prepare alm array
+        alms = load_mass_tracers( i, qobj, mobj, mmask=mmask, kmask=kmask )
         
-        # Calculate the optimal weights to form a multitracer map for delensing
-        #mobj.get_spectra_matrix()
-        #weight = delens_func.multitracer_weights( mobj.clnl_matrix, mobj.signal_covariance[0,:,:], mobj.lmin ) # for analytic filter
-        weight = calculate_multitracer_weights_sim( glob, qobj, mobj, mmask=mmask, kmask=kmask, **kwargs_ov )
+        # coadd tracers
+        cklms = coadd_kappa_alms( alms, weight[ii,:,:] )
         
-        # loop over realizations to combine mass tracers with the above weight
-        for ii, i in enumerate(tqdm.tqdm(glob.rlz,ncols=100,desc='coadding multitracer')):
-            
-            if misctools.check_path(mobj.fcklm[i],**kwargs_ov): continue
-                
-            # prepare alm array
-            alms = load_mass_tracers( i, qobj, mobj, mmask=mmask, kmask=kmask )
-            
-            # coadd tracers
-            #cklms = coadd_kappa_alms( alms, weight ) # for analytic filter
-            cklms = coadd_kappa_alms( alms, weight[ii,:,:] )
-            
-            # save
-            pickle.dump( (cklms), open(mobj.fcklm[i],"wb"), protocol=pickle.HIGHEST_PROTOCOL )
+        # save
+        pickle.dump( (cklms), open(mobj.fcklm[i],"wb"), protocol=pickle.HIGHEST_PROTOCOL )
 
     return mobj
