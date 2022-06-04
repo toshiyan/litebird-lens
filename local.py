@@ -103,6 +103,7 @@ class analysis:
         self.wind['lsst']     = d['msk'] + 'lsst.fits'
         self.wind['cib']      = d['msk'] + 'cib.fits'
         self.wind['cmbs4']    = d['msk'] + 'cmbs4.fits'
+        self.wind['cmbs4_o']  = d['msk'] + 'cmbs4_noFG.fits'
         self.wind['plklens']  = d['msk'] + 'plk_lensing.fits'
 
         #//// residual FG ////#

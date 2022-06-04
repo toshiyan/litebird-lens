@@ -19,7 +19,7 @@ import local
 
 # //// Fixed values //// #
 
-masks = {'lbs4','lbonly'}
+masks = {'lbs4','lbonly','lbfull'}
 
 theta = {'lb':30.,'s4':2.}
 sigma = {'lb':2.,'s4':1.} # uK-arcmin in polarization
@@ -75,6 +75,7 @@ def prepare_masks(nside=None):
     mask = {}
     mask['lbs4']   = W_S4
     mask['lbonly'] = W_LB*(1.-W_S4)
+    mask['lbfull'] = W_LB
     
     if nside is not None:
 
@@ -99,28 +100,44 @@ def qumap_smoothing(iQ,iU,lmax,nside,bl=None):
     return Q, U
 
 
-def prepare_obs_Bmap(pobj,rlz):
+def prepare_obs_Bmap(pobj,cobj,rlz,maskname,lmax=190,nside=128,method='bonly'):
 
-    # compute observed B-mode
-    Qn = hp.read_map(pobj.ffgs[rlz],field=1)/c.Tcmb
-    Un = hp.read_map(pobj.ffgs[rlz],field=2)/c.Tcmb
+    #//// compute large-scale observed B-mode////#
+    bl = cmb.beam(80.,lmax,inv=False) # 80 arcmin beam to match the PTEP FG sims
+    Wl = hp.sphtfunc.pixwin(64,lmax=lmax)
+    wl = hp.sphtfunc.pixwin(nside,lmax=lmax)
+
+    # load mask
+    mask = prepare_masks(nside=nside)[maskname]
+    #mask = hp.ud_grade(hp.read_map('../data/lensing/FG_mask.fits'),nside)
+    #W = cs.utils.apodize(nside, mask, 1.)
+
+    # residual FG noise
+    Qn, Un = hp.read_map(pobj.ffgs[rlz],field=(1,2))/c.Tcmb
     # nan to zero
     Qn[np.isnan(Qn)] = 0
     Un[np.isnan(Un)] = 0
-    NSIDE = hp.get_nside(Qn)
+    Qn = hp.ud_grade( Qn, nside )
+    Un = hp.ud_grade( Un, nside )
+    nBlm = cs.utils.hp_map2alm_spin(nside,lmax,lmax,2,mask*Qn,mask*Un)[1]/(bl[:,None]*Wl[:,None])
 
-    Qs = hp.read_map(pobj.ficmb[rlz],field=1)/c.Tcmb
-    Us = hp.read_map(pobj.ficmb[rlz],field=2)/c.Tcmb
-    nside = hp.get_nside(Qs)
-    
-    lbmax = 4*NSIDE
-    sElm, sBlm = cs.utils.hp_map2alm_spin(nside,lbmax,lbmax,2,Qs,Us)
-    nBlm  = cs.utils.hp_map2alm_spin(NSIDE,lbmax,lbmax,2,Qn,Un)[1]
-    sBmap = cs.utils.hp_alm2map(NSIDE,lbmax,lbmax,sBlm)
-    nBmap = cs.utils.hp_alm2map(NSIDE,lbmax,lbmax,nBlm)
-    oBmap = sBmap + nBmap
-    
-    return sBmap, nBmap, oBmap, sBlm
+    # lensing 
+    Qs, Us = hp.read_map(pobj.ficmb[rlz],field=(1,2))/c.Tcmb
+    nsides = hp.get_nside(Qs)
+    if method == 'bonly': # ignore E-to-B leakage of lensing
+        sBlm = cs.utils.hp_map2alm_spin(nsides,lmax,lmax,2,Qs,Us)[1]
+        Qs, Us = cs.utils.hp_alm2map_spin(nsides,lmax,lmax,2,0*sBlm,sBlm)
+    Qs, Us = qumap_smoothing(Qs,Us,lmax,nside,bl)
+    sBlm = cs.utils.hp_map2alm_spin(nside,lmax,lmax,2,mask*Qs,mask*Us)[1]/(bl[:,None]*wl[:,None])
+
+    # tensor
+    rBlm = pickle.load(open(cobj.fralm[rlz],"rb"))
+    lrmax = len(rBlm[:,0]) - 1
+    Qr, Ur = cs.utils.hp_alm2map_spin(nside,lrmax,lrmax,2,0*rBlm,rBlm)
+    Qr, Ur = qumap_smoothing(Qr,Ur,lmax,nside,bl)
+    rElm, rBlm = cs.utils.hp_map2alm_spin(nside,lmax,lmax,2,mask*Qr,mask*Ur)/(bl[:,None]*wl[:,None])
+
+    return sBlm, rBlm, nBlm
     
 
 def compute_cmb_noise(cobj,snmax,lmax=1024,**kwargs_ov):
@@ -194,12 +211,17 @@ def compute_wiener_highl(pobj,cobj,snmax,nside=512,lmax=1024,**kwargs_ov):
                 smap[0,0,:], smap[1,0,:] = cs.utils.hp_alm2map_spin(nside,lmax,lmax,2,Elm*bl[0],Blm*bl[0])
                 smap[0,1,:], smap[1,1,:] = cs.utils.hp_alm2map_spin(nside,lmax,lmax,2,Elm*bl[1],Blm*bl[1])
 
-            # observed cmb maps
+            
             data = (smap+nmap) * Mask[m]
             invN = np.zeros((2,2,npix))
             invN[:,0,:] = Mask[m]/Ncov[0,0,0]
             invN[:,1,:] = Mask[m]/Ncov[2,2,0]
-            wElm, wBlm = cs.cninv.cnfilter_freq(2,2,nside,lmax,pobj.lcl[1:3,:lmax+1],bl,invN,data,**kwargs_cinv)
+            
+            if m == 'lbfull':  # observed cmb maps with only LB
+                wElm, wBlm = cs.cninv.cnfilter_freq(2,1,nside,lmax,pobj.lcl[1:3,:lmax+1],bl[:1,:],invN[:,:1,:],data[:,:1,:],**kwargs_cinv)
+
+            else:  # observed cmb maps by combining LB and S4
+                wElm, wBlm = cs.cninv.cnfilter_freq(2,2,nside,lmax,pobj.lcl[1:3,:lmax+1],bl,invN,data,**kwargs_cinv)
 
             pickle.dump( (wElm,wBlm), open(cobj.fwalm[m][rlz],"wb"), protocol=pickle.HIGHEST_PROTOCOL )
     

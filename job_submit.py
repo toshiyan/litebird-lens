@@ -17,7 +17,7 @@ def jobfile(f_run):
     #os.system('rm -rf '+f_run+' '+f_sub)
 
 
-#f_run = 'run_mass_cinv.py'
-f_run = 'run_cmb.py'
+f_run = 'run_mass_cinv.py'
+#f_run = 'run_cmb.py'
 jobfile(f_run)
 
